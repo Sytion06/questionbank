@@ -44,7 +44,7 @@ export OPENAI_API_KEY="your_key_here"
 Backend runs at:
 
 ```
-http://localhost:8080
+http://127.0.0.1:8080
 ```
 
 ---
