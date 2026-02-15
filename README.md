@@ -63,3 +63,11 @@ http://localhost:8080
 3. Upload a PDF.
 4. Trigger processing.
 5. View extracted questions.
+
+# Limitations
+
+1. The system currently does **not extract images embedded within questions**. If a question contains diagrams, figures, or graphs, they will not be included in the extracted output.
+
+2. If a document status shows **FAILED**, it is usually because one or two questions could not be parsed correctly by the model. In most cases, the majority of questions are still successfully extracted.
+
+3. To reduce extraction failures, avoid uploading **camera-scanned exam papers**. For best results, upload clear, digitally generated PDF files instead.
