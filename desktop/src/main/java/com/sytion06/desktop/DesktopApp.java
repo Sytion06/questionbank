@@ -56,7 +56,7 @@ public class DesktopApp extends Application {
 
     @Override
     public void start(Stage stage) {
-        stage.setTitle("Gaokao QBank");
+        stage.setTitle("Question Bank");
 
         var tabs = new TabPane();
         tabs.getTabs().add(new Tab("Upload", buildUploadTab(stage)));
