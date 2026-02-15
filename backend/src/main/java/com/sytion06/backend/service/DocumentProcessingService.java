@@ -107,7 +107,7 @@ public class DocumentProcessingService {
                         "    \"numberLabel\": \"string\",\n" +
                         "    \"stem\": \"string\",\n" +
                         "    \"choices\": {\"A\":\"...\",\"B\":\"...\",\"C\":\"...\",\"D\":\"...\"} | null,\n" +
-                        "    \"category\": \"Algebra|Trigonometry|Geometry|Vectors|Probability|Calculus|Sequences|Functions|Other\",\n" +
+                        "    \"category\": \"Algebra|Trigonometry|Geometry|Vectors|Probability|Calculus|Sequences|Functions|Set Theory|Other\",\n" +
                         "    \"confidence\": 0.0,\n" +
                         "    \"needsReview\": true|false,\n" +
                         "    \"reviewReason\": \"string or null\"\n" +

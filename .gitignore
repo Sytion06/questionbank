@@ -28,3 +28,24 @@ replay_pid*
 
 # Ignore Gradle build output directory
 build
+
+# IntelliJ
+.idea/
+*.iml
+out/
+
+# Gradle
+.gradle/
+**/build/
+
+# H2 / local data
+/backend/data/
+/backend/storage/
+
+backend/data/
+*.mv.db
+*.trace.db
+
+# OS junk
+.DS_Store
+Thumbs.db

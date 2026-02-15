@@ -16,6 +16,10 @@ import java.io.IOException;
 import java.nio.file.*;
 import java.util.*;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sytion06.backend.api.dto.QuestionDto;
+
 @RestController
 @RequestMapping("/api/documents")
 public class DocumentController {
@@ -24,6 +28,7 @@ public class DocumentController {
     private final DocumentRepository documents;
     private final DocumentProcessingService processing;
     private final QuestionRepository questionRepo;
+    private final ObjectMapper om = new ObjectMapper();
 
     public DocumentController(DocumentRepository documents, DocumentProcessingService processing,
                               QuestionRepository questionRepo) {
@@ -107,7 +112,29 @@ public class DocumentController {
     }
 
     @GetMapping("/{docId}/questions")
-    public List<Question> questions(@PathVariable UUID docId) {
-        return questionRepo.findByDocumentIdOrderByPageIndexAsc(docId);
+    public List<QuestionDto> questions(@PathVariable UUID docId) {
+        return questionRepo.findByDocumentIdOrderByPageIndexAsc(docId).stream()
+                .map(q -> new QuestionDto(
+                        q.getId(),
+                        q.getDocumentId(),
+                        q.getPageIndex(),
+                        q.getNumberLabel(),
+                        q.getStem(),
+                        parseChoices(q.getChoicesJson()),
+                        q.getCategory(),
+                        q.getConfidence(),
+                        q.isNeedsReview(),
+                        q.getReviewReason()
+                ))
+                .toList();
+    }
+
+    private Map<String, String> parseChoices(String choicesJson) {
+        try {
+            if (choicesJson == null || choicesJson.isBlank()) return null;
+            return om.readValue(choicesJson, new TypeReference<Map<String, String>>() {});
+        } catch (Exception e) {
+            return null;
+        }
     }
 }

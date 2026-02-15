@@ -1,5 +1,6 @@
 package com.sytion06.desktop;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.collections.*;
@@ -14,14 +15,24 @@ import okhttp3.*;
 
 import java.io.File;
 import java.io.IOException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 public class DesktopApp extends Application {
 
     private static final String BASE_URL = "http://127.0.0.1:8080";
-    private static final OkHttpClient HTTP = new OkHttpClient();
+
+    private static final OkHttpClient HTTP = new OkHttpClient.Builder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .writeTimeout(Duration.ofSeconds(60))
+            .readTimeout(Duration.ofSeconds(60))
+            .callTimeout(Duration.ofSeconds(90))
+            .build();
 
     // --- Upload tab state
     private File selectedPdf;
@@ -37,6 +48,12 @@ public class DesktopApp extends Application {
 
     private ScheduledExecutorService poller;
 
+    private final ObservableList<QuestionRow> questionsList = FXCollections.observableArrayList();
+    private TableView<QuestionRow> qTable;
+    private TextArea qPreview;
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     @Override
     public void start(Stage stage) {
         stage.setTitle("Gaokao QBank");
@@ -44,6 +61,7 @@ public class DesktopApp extends Application {
         var tabs = new TabPane();
         tabs.getTabs().add(new Tab("Upload", buildUploadTab(stage)));
         tabs.getTabs().add(new Tab("Documents", buildDocumentsTab()));
+        tabs.getTabs().add(new Tab("Questions", buildQuestionsTab()));
 
         tabs.getTabs().forEach(t -> t.setClosable(false));
 
@@ -288,9 +306,142 @@ public class DesktopApp extends Application {
         }, 2, 2, TimeUnit.SECONDS);
     }
 
+    private Pane buildQuestionsTab() {
+        qTable = new TableView<>(questionsList);
+        qTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+
+        TableColumn<QuestionRow, String> number = new TableColumn<>("No.");
+        number.setCellValueFactory(new PropertyValueFactory<>("numberLabel"));
+
+        TableColumn<QuestionRow, String> cat = new TableColumn<>("Category");
+        cat.setCellValueFactory(new PropertyValueFactory<>("category"));
+
+        TableColumn<QuestionRow, Number> page = new TableColumn<>("Page");
+        page.setCellValueFactory(new PropertyValueFactory<>("pageIndex"));
+
+        TableColumn<QuestionRow, Number> conf = new TableColumn<>("Conf");
+        conf.setCellValueFactory(new PropertyValueFactory<>("confidence"));
+
+        TableColumn<QuestionRow, Boolean> review = new TableColumn<>("Review?");
+        review.setCellValueFactory(new PropertyValueFactory<>("needsReview"));
+
+        qTable.getColumns().addAll(number, cat, page, conf, review);
+
+        qPreview = new TextArea();
+        qPreview.setEditable(false);
+        qPreview.setWrapText(true);
+        qPreview.setPromptText("Select a question to preview its stem...");
+
+        qTable.getSelectionModel().selectedItemProperty().addListener((obs, oldV, newV) -> {
+            if (newV == null) {
+                qPreview.clear();
+                return;
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.append(newV.getStem()).append("\n\n");
+
+            var choices = newV.getChoices();
+            if (choices != null && !choices.isEmpty()) {
+                sb.append("Choices:\n");
+                for (String key : List.of("A", "B", "C", "D", "E")) { // include E just in case
+                    String val = choices.get(key);
+                    if (val != null && !val.isBlank()) {
+                        sb.append(key).append(". ").append(val).append("\n");
+                    }
+                }
+            }
+
+            qPreview.setText(sb.toString());
+        });
+
+        Button loadBtn = new Button("Load questions for selected document");
+        loadBtn.setOnAction(e -> loadQuestionsForSelectedDoc());
+
+        var root = new VBox(10, loadBtn, qTable, new Label("Stem preview:"), qPreview);
+        root.setPadding(new Insets(16));
+        VBox.setVgrow(qTable, Priority.ALWAYS);
+        VBox.setVgrow(qPreview, Priority.SOMETIMES);
+        return root;
+    }
+
+    private void loadQuestionsForSelectedDoc() {
+        DocumentRow sel = table.getSelectionModel().getSelectedItem(); // the documents table
+        if (sel == null) {
+            docsOutput.appendText("Select a document in the Documents tab first.\n");
+            return;
+        }
+
+        Thread worker = new Thread(() -> {
+            try {
+                String json = getQuestionsJson(sel.getDocId());
+                List<QuestionRow> rows = SimpleJson.parseQuestionList(json);
+                Platform.runLater(() -> {
+                    questionsList.setAll(rows);
+                    qPreview.clear();
+                });
+            } catch (Exception ex) {
+                Platform.runLater(() -> docsOutput.appendText("❌ Load questions failed: " + ex.getMessage() + "\n"));
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private String getQuestionsJson(String docId) throws IOException {
+        Request request = new Request.Builder()
+                .url(BASE_URL + "/api/documents/" + docId + "/questions")
+                .get()
+                .build();
+
+        try (Response response = HTTP.newCall(request).execute()) {
+            String body = response.body() != null ? response.body().string() : "";
+            if (!response.isSuccessful()) throw new IOException("HTTP " + response.code() + ": " + body);
+            return body;
+        }
+    }
+
     @Override
     public void stop() {
         if (poller != null) poller.shutdownNow();
+    }
+
+    public static class QuestionRow {
+        private final String id;
+        private final String documentId;
+        private final int pageIndex;
+        private final String numberLabel;
+        private final String category;
+        private final double confidence;
+        private final boolean needsReview;
+        private final String stem;
+        private final Map<String, String> choices;
+
+        public QuestionRow(String id, String documentId, int pageIndex, String numberLabel,
+                           String category, double confidence, boolean needsReview,
+                           String stem, Map<String, String> choices) {
+            this.id = id;
+            this.documentId = documentId;
+            this.pageIndex = pageIndex;
+            this.numberLabel = numberLabel;
+            this.category = category;
+            this.confidence = confidence;
+            this.needsReview = needsReview;
+            this.stem = stem;
+            this.choices = choices;
+        }
+
+        public String getId() { return id; }
+        public String getDocumentId() { return documentId; }
+        public int getPageIndex() { return pageIndex; }
+        public String getNumberLabel() { return numberLabel; }
+        public String getCategory() { return category; }
+        public double getConfidence() { return confidence; }
+        public boolean isNeedsReview() { return needsReview; }
+        public String getStem() { return stem; }
+        public Map<String, String> getChoices() {
+            return choices;
+        }
     }
 
     // --- Table row model
@@ -349,6 +500,62 @@ public class DesktopApp extends Application {
             int secondQuote = obj.indexOf("\"", firstQuote + 1);
             if (firstQuote < 0 || secondQuote < 0) return "";
             return obj.substring(firstQuote + 1, secondQuote);
+        }
+
+        static List<QuestionRow> parseQuestionList(String json) throws IOException {
+            List<Map<String, Object>> raw = MAPPER.readValue(json, new TypeReference<>() {});
+            List<QuestionRow> rows = new ArrayList<>();
+
+            for (Map<String, Object> q : raw) {
+                String id = String.valueOf(q.get("id"));
+                String documentId = String.valueOf(q.get("documentId"));
+                int pageIndex = ((Number) q.get("pageIndex")).intValue();
+                String numberLabel = (String) q.get("numberLabel");
+                String stem = (String) q.get("stem");
+                String category = (String) q.get("category");
+                double confidence = ((Number) q.get("confidence")).doubleValue();
+                boolean needsReview = (Boolean) q.get("needsReview");
+
+                @SuppressWarnings("unchecked")
+                Map<String, String> choices = (Map<String, String>) q.get("choices");
+
+                rows.add(new QuestionRow(id, documentId, pageIndex, numberLabel, category,
+                        confidence, needsReview, stem, choices));
+            }
+            return rows;
+        }
+
+        static int getInt(String obj, String key) {
+            String pattern = "\"" + key + "\"";
+            int i = obj.indexOf(pattern);
+            if (i < 0) return 0;
+            int colon = obj.indexOf(":", i);
+            int end = obj.indexOf(",", colon + 1);
+            if (end < 0) end = obj.indexOf("}", colon + 1);
+            String val = obj.substring(colon + 1, end).trim();
+            return Integer.parseInt(val);
+        }
+
+        static double getDouble(String obj, String key) {
+            String pattern = "\"" + key + "\"";
+            int i = obj.indexOf(pattern);
+            if (i < 0) return 0.0;
+            int colon = obj.indexOf(":", i);
+            int end = obj.indexOf(",", colon + 1);
+            if (end < 0) end = obj.indexOf("}", colon + 1);
+            String val = obj.substring(colon + 1, end).trim();
+            return Double.parseDouble(val);
+        }
+
+        static boolean getBoolean(String obj, String key) {
+            String pattern = "\"" + key + "\"";
+            int i = obj.indexOf(pattern);
+            if (i < 0) return false;
+            int colon = obj.indexOf(":", i);
+            int end = obj.indexOf(",", colon + 1);
+            if (end < 0) end = obj.indexOf("}", colon + 1);
+            String val = obj.substring(colon + 1, end).trim();
+            return "true".equalsIgnoreCase(val);
         }
     }
 
