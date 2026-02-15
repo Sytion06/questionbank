@@ -65,6 +65,8 @@ http://127.0.0.1:8080
 4. Trigger processing.
 5. View extracted questions.
 
+---
+
 # Limitations
 
 1. The system currently does **not extract images embedded within questions**. If a question contains diagrams, figures, or graphs, they will not be included in the extracted output.
