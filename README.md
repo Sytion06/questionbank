@@ -3,6 +3,7 @@
 - Java 21
 - Gradle (or use included Gradle Wrapper)
 - OpenAI API Key
+- Internet Connection
 
 ---
 
