@@ -90,9 +90,15 @@ public class DocumentController {
 
     @PostMapping("/{docId}/process")
     public ResponseEntity<?> process(@PathVariable UUID docId) {
-        if (documents.findById(docId).isEmpty()) {
+        Document doc = documents.findById(docId).orElse(null);
+        if (doc == null) {
             return ResponseEntity.status(404).body(Map.of("error", "Not found"));
         }
+
+        doc.setStatus(DocumentStatus.PROCESSING);
+        doc.setLastError(null);          // if you have lastError
+        documents.save(doc);
+
         runAsync(docId);
         return ResponseEntity.ok(Map.of("docId", docId.toString(), "status", "PROCESSING"));
     }

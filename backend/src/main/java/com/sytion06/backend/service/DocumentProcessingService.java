@@ -34,8 +34,7 @@ public class DocumentProcessingService {
     private final DocumentRepository documents;
     private final QuestionRepository questions;
     private final ObjectMapper om = new ObjectMapper();
-    private final OpenAIClient client = OpenAIOkHttpClient.builder().apiKey("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")
-            .build();// reads OPENAI_API_KEY
+    private final OpenAIClient client = OpenAIOkHttpClient.fromEnv();
 
     public DocumentProcessingService(DocumentRepository documents, QuestionRepository questions) {
         this.documents = documents;
@@ -75,9 +74,15 @@ public class DocumentProcessingService {
                 List<Question> extracted = extractQuestionsWithOpenAI(docId, pageIndex, pageText, pagePng);
                 questions.saveAll(extracted);
             }
+        } catch (Exception e) {
+            doc.setStatus(DocumentStatus.FAILED);
+            doc.setLastError(e.getMessage());
+            documents.save(doc);
+            throw e;
         }
 
         doc.setStatus(DocumentStatus.DONE);
+        doc.setLastError(null);
         documents.save(doc);
     }
 
