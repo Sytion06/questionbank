@@ -1,7 +1,7 @@
 # Requirements
 
 - Java 21
-- Gradle (or use included Gradle Wrapper)
+- Gradle (Gradle Wrapper Included)
 - OpenAI API Key
 - Internet Connection
 
