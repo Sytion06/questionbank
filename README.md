@@ -12,7 +12,7 @@
 ## 1. Clone Repository
 
 ```bash
-git clone https://github.com/yourusername/questionbank.git
+git clone https://github.com/Sytion06/questionbank.git
 cd questionbank
 ```
 
