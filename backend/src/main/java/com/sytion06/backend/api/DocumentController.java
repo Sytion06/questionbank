@@ -1,0 +1,113 @@
+package com.sytion06.backend.api;
+
+import com.sytion06.backend.model.Document;
+import com.sytion06.backend.model.DocumentStatus;
+import com.sytion06.backend.model.Question;
+import com.sytion06.backend.repo.DocumentRepository;
+import com.sytion06.backend.repo.QuestionRepository;
+import com.sytion06.backend.service.DocumentProcessingService;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.scheduling.annotation.Async;
+import java.util.concurrent.CompletableFuture;
+
+import java.io.IOException;
+import java.nio.file.*;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/documents")
+public class DocumentController {
+
+    private final Path storageDir = Paths.get("storage");
+    private final DocumentRepository documents;
+    private final DocumentProcessingService processing;
+    private final QuestionRepository questionRepo;
+
+    public DocumentController(DocumentRepository documents, DocumentProcessingService processing,
+                              QuestionRepository questionRepo) {
+        this.documents = documents;
+        this.processing = processing;
+        this.questionRepo = questionRepo;
+    }
+
+    @PostMapping
+    public ResponseEntity<?> upload(@RequestParam("file") MultipartFile file) throws IOException {
+        if (file.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "File is empty"));
+        }
+        String name = file.getOriginalFilename() == null ? "" : file.getOriginalFilename();
+        if (!name.toLowerCase().endsWith(".pdf")) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Only PDF is supported"));
+        }
+
+        Files.createDirectories(storageDir);
+
+        Document doc = new Document();
+        doc.setFilename(name);
+        doc.setStatus(DocumentStatus.UPLOADED);
+        doc = documents.save(doc); // generates id via @PrePersist
+
+        Path target = storageDir.resolve(doc.getId() + ".pdf");
+        Files.copy(file.getInputStream(), target, StandardCopyOption.REPLACE_EXISTING);
+
+        return ResponseEntity.ok(Map.of(
+                "docId", doc.getId().toString(),
+                "filename", doc.getFilename(),
+                "status", doc.getStatus().name()
+        ));
+    }
+
+    @GetMapping
+    public List<Map<String, Object>> list() {
+        return documents.findAll().stream().sorted(Comparator.comparing(Document::getCreatedAt).reversed())
+                .map(d -> Map.<String, Object>of(
+                        "docId", d.getId().toString(),
+                        "filename", d.getFilename(),
+                        "status", d.getStatus().name(),
+                        "createdAt", d.getCreatedAt().toString()
+                ))
+                .toList();
+    }
+
+    @GetMapping("/{docId}")
+    public ResponseEntity<?> get(@PathVariable UUID docId) {
+        return documents.findById(docId)
+                .<ResponseEntity<?>>map(d -> ResponseEntity.ok(Map.of(
+                        "docId", d.getId().toString(),
+                        "filename", d.getFilename(),
+                        "status", d.getStatus().name(),
+                        "createdAt", d.getCreatedAt().toString()
+                )))
+                .orElseGet(() -> ResponseEntity.status(404).body(Map.of("error", "Not found")));
+    }
+
+    @PostMapping("/{docId}/process")
+    public ResponseEntity<?> process(@PathVariable UUID docId) {
+        if (documents.findById(docId).isEmpty()) {
+            return ResponseEntity.status(404).body(Map.of("error", "Not found"));
+        }
+        runAsync(docId);
+        return ResponseEntity.ok(Map.of("docId", docId.toString(), "status", "PROCESSING"));
+    }
+
+    @Async
+    public CompletableFuture<Void> runAsync(UUID docId) {
+        try {
+            processing.process(docId);
+        } catch (Exception e) {
+            e.printStackTrace(); // <-- add this
+            documents.findById(docId).ifPresent(d -> {
+                d.setStatus(DocumentStatus.FAILED);
+                documents.save(d);
+            });
+        }
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @GetMapping("/{docId}/questions")
+    public List<Question> questions(@PathVariable UUID docId) {
+        return questionRepo.findByDocumentIdOrderByPageIndexAsc(docId);
+    }
+}
