@@ -31,8 +31,8 @@ public class DesktopApp extends Application {
 
     private static final OkHttpClient HTTP = new OkHttpClient.Builder()
             .connectTimeout(Duration.ofSeconds(10))
-            .writeTimeout(Duration.ofSeconds(60))
-            .readTimeout(Duration.ofSeconds(60))
+            .writeTimeout(Duration.ofSeconds(120))
+            .readTimeout(Duration.ofSeconds(120))
             .callTimeout(Duration.ofSeconds(90))
             .build();
 
@@ -57,6 +57,11 @@ public class DesktopApp extends Application {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    // --- Bank tab state
+    private TreeView<TreeNodeData> bankTree;
+    private final Map<String, Integer> categoryLoadedPages = new HashMap<>();
+    private final Set<String> categoryFullyLoaded = new HashSet<>();
+
     @Override
     public void start(Stage stage) {
         stage.setTitle("Question Bank");
@@ -65,6 +70,7 @@ public class DesktopApp extends Application {
         tabs.getTabs().add(new Tab("Upload", buildUploadTab(stage)));
         tabs.getTabs().add(new Tab("Documents", buildDocumentsTab()));
         tabs.getTabs().add(new Tab("Questions", buildQuestionsTab()));
+        tabs.getTabs().add(new Tab("Bank", buildBankTab()));
 
         tabs.getTabs().forEach(t -> t.setClosable(false));
 
@@ -392,7 +398,7 @@ public class DesktopApp extends Application {
         loadBtn.setOnAction(e -> loadQuestionsForSelectedDoc());
 
         SplitPane split = new SplitPane(qTable, previewBox);
-        split.setDividerPositions(0.40);
+        split.setDividerPositions(0.25);
 
         var root = new VBox(10, loadBtn, split);
         root.setPadding(new Insets(16));
@@ -434,6 +440,294 @@ public class DesktopApp extends Application {
             if (!response.isSuccessful()) throw new IOException("HTTP " + response.code() + ": " + body);
             return body;
         }
+    }
+
+    private Pane buildBankTab() {
+        TreeItem<TreeNodeData> root = new TreeItem<>(TreeNodeData.root("Question Bank"));
+        root.setExpanded(true);
+
+        bankTree = new TreeView<>(root);
+        bankTree.setShowRoot(true);
+        bankTree.setCellFactory(tv -> new TreeCell<>() {
+            @Override protected void updateItem(TreeNodeData item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.label);
+            }
+        });
+
+        TextArea preview = new TextArea();
+        preview.setEditable(false);
+        preview.setWrapText(true);
+        preview.setPrefRowCount(18);
+        VBox.setVgrow(preview, Priority.ALWAYS);
+        preview.setPromptText("Select a question to preview...");
+
+        ImageView imageView = new ImageView();
+        imageView.setPreserveRatio(true);
+        imageView.setFitWidth(900);
+        ScrollPane imgScroll = new ScrollPane(imageView);
+        imgScroll.setFitToWidth(true);
+        imgScroll.setPrefViewportHeight(520);
+
+        VBox previewBox = new VBox(10,
+                new Label("Preview:"),
+                preview,
+                new Label("Figure / Page:"),
+                imgScroll
+        );
+        previewBox.setPadding(new Insets(10));
+        VBox.setVgrow(imgScroll, Priority.ALWAYS);
+
+        // Click selection: either load more, or preview question
+        bankTree.getSelectionModel().selectedItemProperty().addListener((obs, oldSel, sel) -> {
+            if (sel == null) return;
+            TreeNodeData data = sel.getValue();
+            if (data == null) return;
+
+            if (data.kind == TreeNodeData.Kind.QUESTION && data.questionId != null
+                    && data.questionId.startsWith("__LOAD_MORE__:")) {
+                String category = data.questionId.substring("__LOAD_MORE__:".length());
+                TreeItem<TreeNodeData> parent = sel.getParent();
+                if (parent != null) loadMoreQuestionsForCategory(category, parent);
+                return;
+            }
+
+            if (data.kind == TreeNodeData.Kind.QUESTION && data.questionId != null) {
+                loadQuestionDetailIntoPreview(data.questionId, preview, imageView);
+            }
+        });
+
+        Button refresh = new Button("Refresh categories");
+        refresh.setOnAction(e -> {
+            categoryLoadedPages.clear();
+            categoryFullyLoaded.clear();
+            root.getChildren().clear();
+            loadCategoriesIntoTree(root);
+        });
+
+        SplitPane split = new SplitPane(bankTree, previewBox);
+        split.setDividerPositions(0.25);
+
+        VBox box = new VBox(10, refresh, split);
+        box.setPadding(new Insets(16));
+        VBox.setVgrow(split, Priority.ALWAYS);
+
+        loadCategoriesIntoTree(root);
+        return box;
+    }
+
+    private void loadCategoriesIntoTree(TreeItem<TreeNodeData> root) {
+        Thread worker = new Thread(() -> {
+            try {
+                Request request = new Request.Builder()
+                        .url(BASE_URL + "/api/questions/categories")
+                        .get()
+                        .build();
+
+                List<Map<String, Object>> items;
+                try (Response response = HTTP.newCall(request).execute()) {
+                    String body = response.body() != null ? response.body().string() : "";
+                    if (!response.isSuccessful()) throw new IOException("HTTP " + response.code() + ": " + body);
+                    items = MAPPER.readValue(body, new TypeReference<>() {});
+                }
+
+                // Sort in your preferred order
+                List<String> order = List.of("Algebra","Trigonometry","Geometry","Vectors","Probability",
+                        "Calculus","Sequences","Functions","Set Theory","Other");
+
+                items.sort(Comparator.comparingInt(m -> {
+                    String c = String.valueOf(m.get("category"));
+                    int idx = order.indexOf(c);
+                    return idx < 0 ? 999 : idx;
+                }));
+
+                Platform.runLater(() -> {
+                    root.getChildren().clear();
+
+                    for (Map<String, Object> m : items) {
+                        String category = String.valueOf(m.get("category"));
+                        int count = ((Number) m.get("count")).intValue();
+
+                        TreeItem<TreeNodeData> catItem =
+                                new TreeItem<>(TreeNodeData.category(category, count));
+
+                        // dummy child so it shows expandable arrow
+                        catItem.getChildren().add(
+                                new TreeItem<>(TreeNodeData.question("Expand to load...", null))
+                        );
+
+                        // ✅ load questions when expanded (reliable)
+                        catItem.expandedProperty().addListener((obs, was, isNow) -> {
+                            if (!isNow) return;
+
+                            if (!categoryLoadedPages.containsKey(category)) {
+                                categoryLoadedPages.put(category, 0);
+                                catItem.getChildren().clear();
+                                loadMoreQuestionsForCategory(category, catItem);
+                            }
+                        });
+
+                        root.getChildren().add(catItem);
+                    }
+                });
+
+            } catch (Exception ex) {
+                Platform.runLater(() -> root.getChildren().setAll(
+                        new TreeItem<>(TreeNodeData.root("❌ Failed: " + ex.getMessage()))
+                ));
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void loadMoreQuestionsForCategory(String category, TreeItem<TreeNodeData> categoryNode) {
+        if (categoryFullyLoaded.contains(category)) return;
+
+        int page = categoryLoadedPages.getOrDefault(category, 0);
+        int size = 50;
+
+        Thread worker = new Thread(() -> {
+            try {
+                HttpUrl url = HttpUrl.parse(BASE_URL + "/api/questions")
+                        .newBuilder()
+                        .addQueryParameter("category", category)
+                        .addQueryParameter("page", String.valueOf(page))
+                        .addQueryParameter("size", String.valueOf(size))
+                        .addQueryParameter("sort", "createdAt,desc")
+                        .build();
+
+                Request request = new Request.Builder().url(url).get().build();
+
+                Map<String, Object> pageObj;
+                try (Response response = HTTP.newCall(request).execute()) {
+                    String body = response.body() != null ? response.body().string() : "";
+                    if (!response.isSuccessful()) throw new IOException("HTTP " + response.code() + ": " + body);
+                    pageObj = MAPPER.readValue(body, new TypeReference<>() {});
+                }
+
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> content = (List<Map<String, Object>>) pageObj.get("content");
+                if (content == null) content = List.of();
+
+                List<TreeItem<TreeNodeData>> newItems = new ArrayList<>();
+                for (Map<String, Object> qObj : content) {
+                    String id = String.valueOf(qObj.get("id"));
+                    String numberLabel = (String) qObj.get("numberLabel");
+                    String stem = (String) qObj.get("stem");
+                    newItems.add(new TreeItem<>(TreeNodeData.question(makeTreeLabel(numberLabel, stem), id)));
+                }
+
+                boolean lastPage = content.size() < size;
+
+                Platform.runLater(() -> {
+                    // remove old "Load more..."
+                    categoryNode.getChildren().removeIf(ti -> {
+                        TreeNodeData d = ti.getValue();
+                        return d != null && "Load more...".equals(d.label);
+                    });
+
+                    categoryNode.getChildren().addAll(newItems);
+
+                    if (lastPage) {
+                        categoryFullyLoaded.add(category);
+                    } else {
+                        categoryNode.getChildren().add(new TreeItem<>(
+                                TreeNodeData.question("Load more...", "__LOAD_MORE__:" + category)
+                        ));
+                    }
+
+                    categoryLoadedPages.put(category, page + 1);
+                });
+
+            } catch (Exception ex) {
+                Platform.runLater(() -> categoryNode.getChildren().add(
+                        new TreeItem<>(TreeNodeData.question("❌ Failed: " + ex.getMessage(), null))
+                ));
+            }
+        });
+
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void loadQuestionDetailIntoPreview(String questionId, TextArea preview, ImageView imageView) {
+        Thread worker = new Thread(() -> {
+            try {
+                Request request = new Request.Builder()
+                        .url(BASE_URL + "/api/questions/" + questionId)
+                        .get()
+                        .build();
+
+                Map<String, Object> qObj;
+                try (Response response = HTTP.newCall(request).execute()) {
+                    String body = response.body() != null ? response.body().string() : "";
+                    if (!response.isSuccessful()) throw new IOException("HTTP " + response.code() + ": " + body);
+                    qObj = MAPPER.readValue(body, new TypeReference<>() {});
+                }
+
+                String numberLabel = (String) qObj.get("numberLabel");
+                String stem = (String) qObj.get("stem");
+                String category = (String) qObj.get("category");
+                double confidence = qObj.get("confidence") == null ? 0.0 : ((Number) qObj.get("confidence")).doubleValue();
+                String pageImageUrl = (String) qObj.get("pageImageUrl");
+                boolean needsReview = (Boolean) qObj.get("needsReview");
+
+                @SuppressWarnings("unchecked")
+                Map<String, String> choices = (Map<String, String>) qObj.get("choices");
+
+                Platform.runLater(() -> {
+                    StringBuilder sb = new StringBuilder();
+
+                    if (stem != null && !stem.isBlank()) {
+                        sb.append(stem.trim()).append("\n\n");
+                    } else {
+                        sb.append("(No stem text extracted)\n\n");
+                    }
+
+                    // Choices next
+                    if (choices != null && !choices.isEmpty()) {
+                        for (String key : List.of("A", "B", "C", "D", "E")) {
+                            String val = choices.get(key);
+                            if (val != null && !val.isBlank()) {
+                                sb.append(key).append(". ").append(val.trim()).append("\n");
+                            }
+                        }
+                        sb.append("\n");
+                    }
+
+                    // Metadata at the bottom
+                    sb.append("\n");
+                    sb.append("Confidence: ").append(confidence).append("\n");
+                    sb.append("Review?: ").append(needsReview).append("\n");
+
+                    preview.setText(sb.toString());
+
+                    // Image
+                    if (pageImageUrl != null && !pageImageUrl.isBlank()) {
+                        imageView.setImage(new Image(BASE_URL + pageImageUrl, true));
+                    } else {
+                        imageView.setImage(null);
+                    }
+                });
+
+            } catch (Exception ex) {
+                Platform.runLater(() -> {
+                    preview.setText("❌ Failed to load question: " + ex.getMessage());
+                    imageView.setImage(null);
+                });
+            }
+        });
+
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private String makeTreeLabel(String numberLabel, String stem) {
+        String s = (stem == null) ? "" : stem.replaceAll("\\s+", " ").trim();
+        if (s.length() > 45) s = s.substring(0, 45) + "...";
+        if (numberLabel == null || numberLabel.isBlank()) return s;
+        return "Q" + numberLabel + "  " + s;
     }
 
     @Override
@@ -600,6 +894,35 @@ public class DesktopApp extends Application {
             String val = obj.substring(colon + 1, end).trim();
             return "true".equalsIgnoreCase(val);
         }
+    }
+
+    private static final class TreeNodeData {
+        enum Kind { ROOT, CATEGORY, QUESTION }
+        final Kind kind;
+        final String label;
+        final String category;     // only for CATEGORY
+        final String questionId;   // only for QUESTION (or special "__LOAD_MORE__:Category")
+
+        private TreeNodeData(Kind kind, String label, String category, String questionId) {
+            this.kind = kind;
+            this.label = label;
+            this.category = category;
+            this.questionId = questionId;
+        }
+
+        static TreeNodeData root(String label) {
+            return new TreeNodeData(Kind.ROOT, label, null, null);
+        }
+
+        static TreeNodeData category(String category, int count) {
+            return new TreeNodeData(Kind.CATEGORY, category + " (" + count + ")", category, null);
+        }
+
+        static TreeNodeData question(String label, String questionId) {
+            return new TreeNodeData(Kind.QUESTION, label, null, questionId);
+        }
+
+        @Override public String toString() { return label; }
     }
 
     public static void main(String[] args) {

@@ -50,9 +50,8 @@ public class DocumentProcessingService {
 
         doc.setStatus(DocumentStatus.PROCESSING);
         doc.setLastError(null);
-        documents.save(doc);
-
         questions.deleteByDocumentId(docId);
+        documents.save(doc);
 
         int totalSaved = 0;
 

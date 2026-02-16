@@ -20,6 +20,7 @@ public class Question {
     @Lob
     private String choicesJson;   // store choices as JSON string for MVP (A/B/C/D)
 
+    @Column(name = "category")
     private String category;      // algebra, trig, vectors, geometry, probability...
     private double confidence;    // 0..1
     private boolean needsReview;  // true if low confidence / blurry / unclear

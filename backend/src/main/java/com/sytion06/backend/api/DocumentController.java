@@ -2,7 +2,6 @@ package com.sytion06.backend.api;
 
 import com.sytion06.backend.model.Document;
 import com.sytion06.backend.model.DocumentStatus;
-import com.sytion06.backend.model.Question;
 import com.sytion06.backend.repo.DocumentRepository;
 import com.sytion06.backend.repo.QuestionRepository;
 import com.sytion06.backend.service.DocumentProcessingService;
