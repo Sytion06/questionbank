@@ -25,7 +25,10 @@ import org.springframework.transaction.annotation.Transactional;
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 @Service
@@ -41,49 +44,75 @@ public class DocumentProcessingService {
         this.questions = questions;
     }
 
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     public void process(UUID docId) throws Exception {
         Document doc = documents.findById(docId).orElseThrow();
+
         doc.setStatus(DocumentStatus.PROCESSING);
+        doc.setLastError(null);
         documents.save(doc);
 
-        Path pdfPath = Paths.get("storage").resolve(docId + ".pdf");
-        if (!Files.exists(pdfPath)) throw new FileNotFoundException(pdfPath.toString());
+        questions.deleteByDocumentId(docId);
 
-        // Store rendered page images so JavaFX can show them later
-        Path pagesDir = Paths.get("storage").resolve(docId.toString()).resolve("pages");
-        Files.createDirectories(pagesDir);
-        try (PDDocument pdf = Loader.loadPDF(pdfPath.toFile())) {
-            PDFRenderer renderer = new PDFRenderer(pdf);
-            int pageCount = pdf.getNumberOfPages();
+        int totalSaved = 0;
 
-            for (int pageIndex = 0; pageIndex < pageCount; pageIndex++) {
-                String pageText = extractText(pdf, pageIndex);
-                if (looksLikeAnswerKeyStart(pageText)) {
-                    // stop when reaching 解析/答案 section (your 2024 pdf includes “解析版” later :contentReference[oaicite:5]{index=5})
-                    break;
-                }
-
-                Path pagePng = pagesDir.resolve(String.format("p%03d.png", pageIndex + 1));
-                if (!Files.exists(pagePng)) {
-                    BufferedImage img = renderer.renderImageWithDPI(pageIndex, 150);
-                    ImageIO.write(img, "png", pagePng.toFile());
-                }
-
-                // Call OpenAI to extract questions from this page
-                List<Question> extracted = extractQuestionsWithOpenAI(docId, pageIndex, pageText, pagePng);
-                questions.saveAll(extracted);
+        try {
+            Path pdfPath = Paths.get("storage").resolve(docId + ".pdf");
+            if (!Files.exists(pdfPath)) {
+                throw new FileNotFoundException(pdfPath.toString());
             }
+
+            Path pagesDir = Paths.get("storage").resolve(docId.toString()).resolve("pages");
+            Files.createDirectories(pagesDir);
+
+            try (PDDocument pdf = Loader.loadPDF(pdfPath.toFile())) {
+                PDFRenderer renderer = new PDFRenderer(pdf);
+                int pageCount = pdf.getNumberOfPages();
+
+                for (int pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+                    try {
+                        String pageText = extractText(pdf, pageIndex);
+                        if (looksLikeAnswerKeyStart(pageText)) break;
+
+                        Path pagePng = pagesDir.resolve(String.format("p%03d.png", pageIndex + 1));
+                        if (!Files.exists(pagePng)) {
+                            BufferedImage img = renderer.renderImageWithDPI(pageIndex, 150);
+                            ImageIO.write(img, "png", pagePng.toFile());
+                        }
+
+                        List<Question> extracted = extractWithRetry(docId, pageIndex, pageText, pagePng);
+
+                        if (extracted != null && !extracted.isEmpty()) {
+                            questions.saveAll(extracted);
+                            totalSaved += extracted.size();
+                        }
+
+                    } catch (Exception pageErr) {
+                        // ✅ log and continue so one bad page doesn't fail the whole doc
+                        pageErr.printStackTrace();
+
+                        // Optional: also append to doc.lastError but keep going
+                        doc.setLastError("Page " + (pageIndex + 1) + " failed: " + pageErr.getMessage());
+                        documents.save(doc);
+                    }
+                }
+            }
+
+            if (totalSaved == 0) {
+                doc.setStatus(DocumentStatus.FAILED);
+                doc.setLastError("No questions extracted.");
+            } else {
+                doc.setStatus(DocumentStatus.DONE);
+                doc.setLastError(null);
+            }
+            documents.save(doc);
+
         } catch (Exception e) {
             doc.setStatus(DocumentStatus.FAILED);
             doc.setLastError(e.getMessage());
             documents.save(doc);
             throw e;
         }
-
-        doc.setStatus(DocumentStatus.DONE);
-        doc.setLastError(null);
-        documents.save(doc);
     }
 
     private String extractText(PDDocument pdf, int pageIndex) throws IOException {
@@ -96,7 +125,7 @@ public class DocumentProcessingService {
     private boolean looksLikeAnswerKeyStart(String text) {
         if (text == null) return false;
         String t = text.replaceAll("\\s+", "");
-        return t.contains("解析版") || t.contains("参考答案") || t.contains("答案") || t.contains("解析");
+        return t.contains("解析版") || t.contains("参考答案") || t.contains("答案") || t.contains("解析") || t.contains("Solutions") || t.contains("Answer");
     }
 
     private List<Question> extractQuestionsWithOpenAI(UUID docId, int pageIndex, String pageText, Path pagePng) throws Exception {
@@ -116,6 +145,7 @@ public class DocumentProcessingService {
                         "    \"confidence\": 0.0,\n" +
                         "    \"needsReview\": true|false,\n" +
                         "    \"reviewReason\": \"string or null\"\n" +
+                        "    \"hasFigure\": true|false,\n" +
                         "  }\n" +
                         "] }\n" +
                         "Rules:\n" +
@@ -140,13 +170,15 @@ public class DocumentProcessingService {
         );
 
         ResponseCreateParams params = ResponseCreateParams.builder()
-                .model("gpt-4.1-mini")
+                .model("gpt-5.2")
                 .inputOfResponse(items)   // ✅ convenience alias
                 .build();
 
         Response resp = client.responses().create(params);
 
         String json = extractOutputTextJsonSafe(resp);
+
+        saveRawResponse(docId, pageIndex, json);
 
         JsonNode root = om.readTree(json);
         JsonNode arr = root.get("questions");
@@ -163,6 +195,8 @@ public class DocumentProcessingService {
             entity.setConfidence(q.path("confidence").asDouble(0.0));
             entity.setNeedsReview(q.path("needsReview").asBoolean(false));
             entity.setReviewReason(q.path("reviewReason").isNull() ? null : q.path("reviewReason").asText(null));
+            entity.setHasFigure(q.path("hasFigure").asBoolean(false));
+            entity.setPageImageFile(String.format("p%03d.png", pageIndex + 1));
 
             JsonNode choices = q.get("choices");
             entity.setChoicesJson(choices == null || choices.isNull() ? null : choices.toString());
@@ -170,6 +204,70 @@ public class DocumentProcessingService {
             out.add(entity);
         }
         return out;
+    }
+
+    private List<Question> extractWithRetry(UUID docId, int pageIndex, String pageText, Path pagePng) throws Exception {
+        int maxAttempts = 3;
+        long backoffMs = 500;
+
+        Exception last = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                return extractQuestionsWithOpenAI(docId, pageIndex, pageText, pagePng);
+            } catch (Exception e) {
+                last = e;
+
+                // save debug info for this failure (super important)
+                saveFailureLog(docId, pageIndex, attempt, e);
+
+                if (attempt < maxAttempts) {
+                    Thread.sleep(backoffMs);
+                    backoffMs *= 2;
+                }
+            }
+        }
+        throw last;
+    }
+
+    private void saveFailureLog(UUID docId, int pageIndex, int attempt, Exception e) {
+        try {
+            Path dir = Paths.get("storage")
+                    .resolve(docId.toString())
+                    .resolve("logs");
+            Files.createDirectories(dir);
+
+            String ts = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
+            Path out = dir.resolve(String.format("page_%03d_attempt_%d_%s.txt", pageIndex + 1, attempt, ts));
+
+            String msg = "docId: " + docId + "\n"
+                    + "pageIndex: " + pageIndex + " (page " + (pageIndex + 1) + ")\n"
+                    + "attempt: " + attempt + "\n"
+                    + "exception: " + e.getClass().getName() + "\n"
+                    + "message: " + (e.getMessage() == null ? "" : e.getMessage()) + "\n";
+
+            Files.writeString(out, msg, StandardCharsets.UTF_8);
+
+        } catch (Exception ignore) {
+            // don't let logging break processing
+        }
+    }
+
+    /**
+     * Optional: save the raw model response so you can debug JSON issues.
+     * Call this inside extractQuestionsWithOpenAI right after you receive the response string.
+     */
+    private void saveRawResponse(UUID docId, int pageIndex, String raw) {
+        try {
+            Path dir = Paths.get("storage")
+                    .resolve(docId.toString())
+                    .resolve("raw");
+            Files.createDirectories(dir);
+
+            Path out = dir.resolve(String.format("page_%03d_response.json", pageIndex + 1));
+            Files.writeString(out, raw == null ? "" : raw, StandardCharsets.UTF_8);
+
+        } catch (Exception ignore) {
+        }
     }
 
     public static String extractOutputTextJsonSafe(Object responseObj) {

@@ -8,4 +8,6 @@ import java.util.UUID;
 
 public interface QuestionRepository extends JpaRepository<Question, UUID> {
     List<Question> findByDocumentIdOrderByPageIndexAsc(UUID documentId);
+
+    void deleteByDocumentId(UUID documentId);
 }

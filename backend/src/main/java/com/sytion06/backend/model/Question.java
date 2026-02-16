@@ -27,6 +27,10 @@ public class Question {
 
     private Instant createdAt;
 
+    private boolean hasFigure;
+    @Column(name = "page_image_file")
+    private String pageImageFile;
+
     @PrePersist
     void prePersist() {
         if (id == null) id = UUID.randomUUID();
@@ -122,5 +126,21 @@ public class Question {
 
     public void setCreatedAt(Instant createdAt) {
         this.createdAt = createdAt;
+    }
+
+    public boolean isHasFigure() {
+        return hasFigure;
+    }
+
+    public void setHasFigure(boolean hasFigure) {
+        this.hasFigure = hasFigure;
+    }
+
+    public String getPageImageFile() {
+        return pageImageFile;
+    }
+
+    public void setPageImageFile(String pageImageFile) {
+        this.pageImageFile = pageImageFile;
     }
 }

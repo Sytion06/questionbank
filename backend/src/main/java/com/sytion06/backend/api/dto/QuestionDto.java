@@ -13,5 +13,7 @@ public record QuestionDto(
         String category,
         double confidence,
         boolean needsReview,
-        String reviewReason
+        String reviewReason,
+        boolean hasFigure,
+        String pageImageUrl
 ) {}

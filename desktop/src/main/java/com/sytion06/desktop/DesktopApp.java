@@ -12,6 +12,8 @@ import javafx.scene.layout.*;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import okhttp3.*;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
 
 import java.io.File;
 import java.io.IOException;
@@ -51,6 +53,7 @@ public class DesktopApp extends Application {
     private final ObservableList<QuestionRow> questionsList = FXCollections.observableArrayList();
     private TableView<QuestionRow> qTable;
     private TextArea qPreview;
+    private ImageView qImageView;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -65,7 +68,7 @@ public class DesktopApp extends Application {
 
         tabs.getTabs().forEach(t -> t.setClosable(false));
 
-        stage.setScene(new Scene(tabs, 950, 650));
+        stage.setScene(new Scene(tabs, 1200, 800));
         stage.show();
 
         // initial load
@@ -307,6 +310,7 @@ public class DesktopApp extends Application {
     }
 
     private Pane buildQuestionsTab() {
+        // --- table (LEFT)
         qTable = new TableView<>(questionsList);
         qTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
 
@@ -327,14 +331,36 @@ public class DesktopApp extends Application {
 
         qTable.getColumns().addAll(number, cat, page, conf, review);
 
+        // --- text preview (RIGHT top)
         qPreview = new TextArea();
         qPreview.setEditable(false);
         qPreview.setWrapText(true);
-        qPreview.setPromptText("Select a question to preview its stem...");
+        qPreview.setPrefRowCount(18);
+        qPreview.setPromptText("Select a question to preview...");
 
+        // --- image preview (RIGHT bottom)
+        qImageView = new ImageView();
+        qImageView.setPreserveRatio(true);
+        qImageView.setFitWidth(900);
+
+        ScrollPane imgScroll = new ScrollPane(qImageView);
+        imgScroll.setFitToWidth(true);
+        imgScroll.setPrefViewportHeight(520);
+
+        VBox previewBox = new VBox(10,
+                new Label("Preview:"),
+                qPreview,
+                new Label("Figure / Page:"),
+                imgScroll
+        );
+        previewBox.setPadding(new Insets(10));
+        VBox.setVgrow(imgScroll, Priority.ALWAYS);
+
+        // --- selection listener
         qTable.getSelectionModel().selectedItemProperty().addListener((obs, oldV, newV) -> {
             if (newV == null) {
                 qPreview.clear();
+                qImageView.setImage(null);
                 return;
             }
 
@@ -344,24 +370,33 @@ public class DesktopApp extends Application {
             var choices = newV.getChoices();
             if (choices != null && !choices.isEmpty()) {
                 sb.append("Choices:\n");
-                for (String key : List.of("A", "B", "C", "D", "E")) { // include E just in case
+                for (String key : List.of("A", "B", "C", "D", "E")) {
                     String val = choices.get(key);
                     if (val != null && !val.isBlank()) {
                         sb.append(key).append(". ").append(val).append("\n");
                     }
                 }
             }
-
             qPreview.setText(sb.toString());
+
+            // Load image if available
+            if (newV.getPageImageUrl() != null && !newV.getPageImageUrl().isBlank()) {
+                String url = BASE_URL + newV.getPageImageUrl();
+                qImageView.setImage(new javafx.scene.image.Image(url, true));
+            } else {
+                qImageView.setImage(null);
+            }
         });
 
         Button loadBtn = new Button("Load questions for selected document");
         loadBtn.setOnAction(e -> loadQuestionsForSelectedDoc());
 
-        var root = new VBox(10, loadBtn, qTable, new Label("Stem preview:"), qPreview);
+        SplitPane split = new SplitPane(qTable, previewBox);
+        split.setDividerPositions(0.40);
+
+        var root = new VBox(10, loadBtn, split);
         root.setPadding(new Insets(16));
-        VBox.setVgrow(qTable, Priority.ALWAYS);
-        VBox.setVgrow(qPreview, Priority.SOMETIMES);
+        VBox.setVgrow(split, Priority.ALWAYS);
         return root;
     }
 
@@ -416,10 +451,12 @@ public class DesktopApp extends Application {
         private final boolean needsReview;
         private final String stem;
         private final Map<String, String> choices;
+        private final boolean hasFigure;
+        private final String pageImageUrl;
 
         public QuestionRow(String id, String documentId, int pageIndex, String numberLabel,
                            String category, double confidence, boolean needsReview,
-                           String stem, Map<String, String> choices) {
+                           String stem, Map<String, String> choices, boolean hasFigure, String pageImageUrl) {
             this.id = id;
             this.documentId = documentId;
             this.pageIndex = pageIndex;
@@ -429,6 +466,8 @@ public class DesktopApp extends Application {
             this.needsReview = needsReview;
             this.stem = stem;
             this.choices = choices;
+            this.hasFigure = hasFigure;
+            this.pageImageUrl = pageImageUrl;
         }
 
         public String getId() { return id; }
@@ -442,6 +481,8 @@ public class DesktopApp extends Application {
         public Map<String, String> getChoices() {
             return choices;
         }
+        public boolean isHasFigure() { return hasFigure; }
+        public String getPageImageUrl() { return pageImageUrl; }
     }
 
     // --- Table row model
@@ -515,12 +556,14 @@ public class DesktopApp extends Application {
                 String category = (String) q.get("category");
                 double confidence = ((Number) q.get("confidence")).doubleValue();
                 boolean needsReview = (Boolean) q.get("needsReview");
+                boolean hasFigure = q.get("hasFigure") != null && (Boolean) q.get("hasFigure");
+                String pageImageUrl = (String) q.get("pageImageUrl");
 
                 @SuppressWarnings("unchecked")
                 Map<String, String> choices = (Map<String, String>) q.get("choices");
 
                 rows.add(new QuestionRow(id, documentId, pageIndex, numberLabel, category,
-                        confidence, needsReview, stem, choices));
+                        confidence, needsReview, stem, choices, hasFigure, pageImageUrl));
             }
             return rows;
         }

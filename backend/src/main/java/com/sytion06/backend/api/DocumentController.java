@@ -11,6 +11,9 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.scheduling.annotation.Async;
 import java.util.concurrent.CompletableFuture;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.UrlResource;
+import org.springframework.http.HttpHeaders;
 
 import java.io.IOException;
 import java.nio.file.*;
@@ -95,12 +98,33 @@ public class DocumentController {
             return ResponseEntity.status(404).body(Map.of("error", "Not found"));
         }
 
-        doc.setStatus(DocumentStatus.PROCESSING);
-        doc.setLastError(null);          // if you have lastError
-        documents.save(doc);
+        if (doc.getStatus() == DocumentStatus.PROCESSING) {
+            return ResponseEntity.status(409)
+                    .body(Map.of("error", "Document is already processing"));
+        }
 
         runAsync(docId);
         return ResponseEntity.ok(Map.of("docId", docId.toString(), "status", "PROCESSING"));
+    }
+
+    @GetMapping("/{docId}/pages/{fileName}")
+    public ResponseEntity<Resource> getPageImage(
+            @PathVariable UUID docId,
+            @PathVariable String fileName) throws Exception {
+
+        Path file = Paths.get("storage")
+                .resolve(docId.toString())
+                .resolve("pages")
+                .resolve(fileName);
+
+        if (!Files.exists(file)) {
+            return ResponseEntity.status(404).build();
+        }
+
+        Resource resource = new UrlResource(file.toUri());
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_TYPE, "image/png")
+                .body(resource);
     }
 
     @Async
@@ -108,10 +132,15 @@ public class DocumentController {
         try {
             processing.process(docId);
         } catch (Exception e) {
-            e.printStackTrace(); // <-- add this
+            e.printStackTrace();
+
             documents.findById(docId).ifPresent(d -> {
-                d.setStatus(DocumentStatus.FAILED);
-                documents.save(d);
+                // Only mark FAILED if still processing (prevents overwriting DONE from a later run)
+                if (d.getStatus() == DocumentStatus.PROCESSING) {
+                    d.setStatus(DocumentStatus.FAILED);
+                    d.setLastError(e.getMessage());
+                    documents.save(d);
+                }
             });
         }
         return CompletableFuture.completedFuture(null);
@@ -130,7 +159,12 @@ public class DocumentController {
                         q.getCategory(),
                         q.getConfidence(),
                         q.isNeedsReview(),
-                        q.getReviewReason()
+                        q.getReviewReason(),
+                        q.isHasFigure(),
+                        "/api/documents/"
+                                + q.getDocumentId()
+                                + "/pages/"
+                                + q.getPageImageFile()
                 ))
                 .toList();
     }
